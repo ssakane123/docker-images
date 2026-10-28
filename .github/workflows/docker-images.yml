@@ -1,0 +1,102 @@
+# Docker イメージを GitHub Actions で build し、GHCR に push する。
+#
+#   - Pull Request : 変更のあったイメージだけ build (push しない)
+#   - main への push: 変更のあったイメージだけ build & push
+#   - python / go は rocky9 (ghcr.io/<owner>/rocky9:latest) をベースにするため、
+#     rocky9 -> (python, go) の順に実行する。rocky9 が変更されたら python / go も再 build する。
+#
+# イメージ名 = ghcr.io/<オーナー>/<ディレクトリ名> (タグ: latest, sha-<commit>)
+name: docker-images
+
+on:
+  pull_request:
+    paths:
+      - "rocky9/**"
+      - "python/**"
+      - "go/**"
+      - ".github/workflows/*.yml"
+  push:
+    branches: [main]
+    paths:
+      - "rocky9/**"
+      - "python/**"
+      - "go/**"
+      - ".github/workflows/*.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR は新しい push で古い実行を止める。main は止めない
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# ワークフロー全体は read 権限のみにする
+permissions:
+  contents: read
+
+jobs:
+  # どのディレクトリに変更があったかを調べる
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rocky9: ${{ steps.filter.outputs.rocky9 }}
+      python: ${{ steps.filter.outputs.python }}
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      # https://github.com/actions/checkout
+      - uses: actions/checkout@v7
+      # https://github.com/dorny/paths-filter
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          # python / go は rocky9 が変わったときも対象
+          filters: |
+            rocky9:
+              - 'rocky9/**'
+              - '.github/workflows/*.yml'
+            python:
+              - 'python/**'
+              - 'rocky9/**'
+              - '.github/workflows/*.yml'
+            go:
+              - 'go/**'
+              - 'rocky9/**'
+              - '.github/workflows/*.yml'
+
+  # 1) ベースイメージ
+  rocky9:
+    needs: changes
+    if: needs.changes.outputs.rocky9 == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      image: rocky9
+      push: ${{ github.event_name == 'push' }}
+
+  # 2) rocky9 の build & push が終わってから実行 (rocky9 がスキップされても実行、失敗したら実行しない)
+  python:
+    needs: [changes, rocky9]
+    if: ${{ !cancelled() && !failure() && needs.changes.outputs.python == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      image: python
+      push: ${{ github.event_name == 'push' }}
+      rocky9-base: true
+
+  go:
+    needs: [changes, rocky9]
+    if: ${{ !cancelled() && !failure() && needs.changes.outputs.go == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      image: go
+      push: ${{ github.event_name == 'push' }}
+      rocky9-base: true
