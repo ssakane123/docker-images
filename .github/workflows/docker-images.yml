@@ -6,6 +6,7 @@
 #     rocky9 -> (python, go) の順に実行する。rocky9 が変更されたら python / go も再 build する。
 #
 # イメージ名 = ghcr.io/<オーナー>/<ディレクトリ名> (タグ: latest, sha-<commit>)
+# go / python はさらに Dockerfile の ARG から取り出した major.minor タグ (go:1.27, python:3.14) を付ける
 name: docker-images
 
 on:
@@ -88,6 +89,7 @@ jobs:
       image: python
       push: ${{ github.event_name == 'push' }}
       rocky9-base: true
+      version-arg: PYTHON_VERSION
 
   go:
     needs: [changes, rocky9]
@@ -100,3 +102,4 @@ jobs:
       image: go
       push: ${{ github.event_name == 'push' }}
       rocky9-base: true
+      version-arg: GO_VERSION
