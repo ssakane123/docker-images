@@ -27,6 +27,7 @@ There is no lint/test tooling; CI is the only check.
 
 - `docker-images.yml` — triggers on PRs and pushes to `main` touching `rocky9/**`, `python/**`, `go/**`, or `.github/workflows/*.yml`. A `changes` job (dorny/paths-filter) decides what to build. PRs build only (`push: false`); `main` builds and pushes. Build order is `rocky9` → (`python`, `go`); a change in `rocky9/**` or in the workflows rebuilds all of them, and `python`/`go` still run when `rocky9` is skipped but not when it fails.
 - `_build-image.yml` — reusable workflow that builds one image (input `image` = directory name). Runs on `ubuntu-24.04-arm`. With `rocky9-base: true` it passes `BASE_IMAGE=ghcr.io/<owner>/rocky9:latest`, so downstream images are built on the just-pushed base.
+- `update-pins.yml` — 毎日 (22:00 JST) と手動実行で、Dockerfile の pin (uv / Go / Python 系列) を最新版に追従させる PR を作る。更新は [pin-updater](https://github.com/ssakane123/pin-updater) (`PIN_UPDATER_REV` で commit SHA 固定) が行い、pin ごとにジョブ (matrix) とブランチ `auto/<pin>-<id>` を分ける。Python 系列は `.github/scripts/rocky-python-series.py` が Rocky 9 AppStream (aarch64) の repodata から取得する。commit / push / PR 作成は peter-evans/create-pull-request (commit SHA 固定) が行う。PR は `GITHUB_TOKEN` で作るため `docker-images.yml` は自動起動しない (close -> reopen で検証が走る)。Settings > Actions で "Allow GitHub Actions to create and approve pull requests" が必要。
 
 ### Tagging
 
