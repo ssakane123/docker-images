@@ -4,8 +4,8 @@ FROM ${BASE_IMAGE}
 
 ARG PYTHON_VERSION=3.14
 
-ARG UV_VERSION=0.13.8
-ARG UV_INSTALLER_SHA256=4d8fa56e00f16b66feecacbd943773c61d61ab768b13856de350d86fd8740e2f
+ARG UV_VERSION=0.13.9
+ARG UV_INSTALLER_SHA256=ccc888115ac831bd9c30855c1d4abeae32fce679701d2aac8e72eb0beffb41c2
 
 # --- Python と CI 用のツール ----------------------------------------
 RUN dnf -y --refresh --setopt=install_weak_deps=False install \
