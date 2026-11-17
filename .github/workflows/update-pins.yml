@@ -1,0 +1,198 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+# Dockerfile で固定している各ツールのバージョンと SHA-256 を、最新の公開版に追従させる PR を作る。
+#
+#   - 毎日 (22:00 JST) と手動実行で動く
+#   - pin ごとに別ジョブ・別ブランチ (auto/<pin>-<id>) ・別 PR にする
+#   - 更新が無ければ何もしない。同じ内容の提案済みブランチがあれば再提案しない
+#   - 値の書き換えは pin-updater、commit / push / PR 作成は peter-evans/create-pull-request が行う
+#     (どちらも commit SHA で固定)
+#
+# 前提: リポジトリの Settings > Actions > General で
+#       "Allow GitHub Actions to create and approve pull requests" を有効にしておく。
+# 注意: GITHUB_TOKEN で作った PR では docker-images.yml が自動では起動しない。
+#       PR を close -> reopen すると build 検証が走る。
+name: update-pins
+
+on:
+  schedule:
+    # 13:00 UTC = 22:00 JST
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# ワークフロー全体は read 権限のみにする
+permissions:
+  contents: read
+
+env:
+  # https://github.com/ssakane123/pin-updater (commit SHA で固定)
+  PIN_UPDATER_REV: 78e18d4a9e8888b5eb39a0d8cb5462d02f9dc7fa
+
+jobs:
+  update-pin:
+    name: update ${{ matrix.pin }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # ブランチの push と PR 作成に必要
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      # 1 つの pin の失敗で他の pin の更新を止めない
+      fail-fast: false
+      matrix:
+        include:
+          - pin: uv
+            file: python/Dockerfile
+            # ブランチ名の識別子にする行 (これらの値が同じなら同じ提案とみなす)
+            pattern: '^ARG (UV_VERSION|UV_INSTALLER_SHA256)='
+            title: Update uv pin
+            description: uv の installer のバージョンと SHA-256 を更新します。
+          - pin: go
+            file: go/Dockerfile
+            pattern: '^ARG (GO_VERSION|GO_SHA256)='
+            title: Update Go pin
+            description: Go のバージョンと linux-arm64 アーカイブの SHA-256 を更新します。
+          - pin: python
+            file: python/Dockerfile
+            pattern: '^ARG PYTHON_VERSION='
+            title: Update Python pin
+            description: Rocky Linux 9 の AppStream で提供されている最新の Python 系列に更新します。
+    env:
+      PIN_NAME: ${{ matrix.pin }}
+      PIN_FILE: ${{ matrix.file }}
+      PIN_PATTERN: ${{ matrix.pattern }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
+    steps:
+      # https://github.com/actions/checkout
+      - uses: actions/checkout@v7
+        with:
+          # workflow_dispatch を別ブランチから実行しても、常に既定ブランチを基準にする
+          ref: ${{ env.BASE_BRANCH }}
+          # トークンを .git/config に残さない (push の認証は create-pull-request が自分で行う)
+          persist-credentials: false
+
+      # pin-updater は Python 3.14 以上が必要
+      # https://github.com/actions/setup-python
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: install pin-updater
+        run: python -m pip install "git+https://github.com/ssakane123/pin-updater.git@${PIN_UPDATER_REV}"
+
+      # --- pin ごとに最新版のメタデータを取得し、Dockerfile を書き換える --------------
+      - name: update uv
+        if: matrix.pin == 'uv'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 認証付きで取得する (未認証だと共有 IP の API rate limit に当たりやすい)
+          # asset の digest (sha256:...) から installer の SHA-256 を取り出す
+          gh api repos/astral-sh/uv/releases/latest | pin-updater --stdin \
+            --version-key tag_name --github-asset uv-installer.sh \
+            --file "$PIN_FILE" --version-env UV_VERSION --sha256-env UV_INSTALLER_SHA256
+
+      - name: update go
+        if: matrix.pin == 'go'
+        run: |
+          set -euo pipefail
+          # 公式 API は新しいリリース順に並ぶ: https://pkg.go.dev/golang.org/x/website/internal/dl
+          curl -fsSL 'https://go.dev/dl/?mode=json' | python -I -c '
+          import json, sys
+
+          release = next(item for item in json.load(sys.stdin) if item["stable"] is True)
+          version = release["version"]
+          if not version.startswith("go"):
+              raise ValueError("invalid Go version prefix")
+          checksum, = (item["sha256"] for item in release["files"]
+                       if item["os"] == "linux" and item["arch"] == "arm64"
+                       and item["kind"] == "archive"
+                       and item["filename"] == f"{version}.linux-arm64.tar.gz")
+          print(json.dumps({"version": version[2:], "sha256": checksum}))
+          ' | pin-updater --stdin --file "$PIN_FILE" --version-env GO_VERSION --sha256-env GO_SHA256
+
+      - name: update python
+        if: matrix.pin == 'python'
+        run: |
+          set -euo pipefail
+          python -I .github/scripts/rocky-python-series.py \
+            | pin-updater --stdin --file "$PIN_FILE" --version-env PYTHON_VERSION
+
+      # --- 変更があり、まだ提案していなければ PR を作る ------------------------------
+      - name: check proposal
+        id: proposal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # git diff --quiet: 0 = 変更なし, 1 = 変更あり, それ以外 = エラー
+          status=0
+          git diff --quiet -- "$PIN_FILE" || status=$?
+          case "$status" in
+            0)
+              echo "${PIN_NAME} pin unchanged; no PR needed."
+              echo 'propose=false' >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            1) ;;
+            *) exit "$status" ;;
+          esac
+
+          # 更新後の pin の値からブランチ名を決める (同じ値なら同じブランチ名になる)
+          identity=$(grep -E "$PIN_PATTERN" "$PIN_FILE" | git hash-object --stdin)
+          branch="auto/${PIN_NAME}-${identity}"
+
+          # checkout は認証情報を残さないので、URL にトークンを含める (ログではマスクされる)
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          status=0
+          git ls-remote --exit-code --heads "$remote" "refs/heads/${branch}" > /dev/null || status=$?
+          case "$status" in
+            0)
+              echo "${branch} already proposed; delete the remote branch to re-propose."
+              echo 'propose=false' >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              echo 'propose=true' >> "$GITHUB_OUTPUT"
+              echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo 'Unable to check remote branch' >&2
+              exit "$status"
+              ;;
+          esac
+
+      # commit / push / PR 作成は公開アクションに任せる
+      # https://github.com/peter-evans/create-pull-request (v8.1.3, commit SHA で固定)
+      - id: cpr
+        if: steps.proposal.outputs.propose == 'true'
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1
+        with:
+          token: ${{ github.token }}
+          base: ${{ env.BASE_BRANCH }}
+          branch: ${{ steps.proposal.outputs.branch }}
+          add-paths: ${{ matrix.file }}
+          commit-message: ${{ matrix.title }}
+          committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          title: ${{ matrix.title }}
+          body: |
+            ${{ matrix.description }}
+
+            このワークフローは GITHUB_TOKEN で PR を作成するため、docker-images の build 検証は自動では起動しません。マージ前にこの PR を close して reopen すると検証が走ります。
+
+      # PR 作成だけが失敗した場合、push 済みのブランチを消す。
+      # 残すと次回以降「提案済み」と誤認して再提案されない
+      - name: remove branch after failed PR creation
+        if: always() && (steps.cpr.outcome == 'failure' || steps.cpr.outcome == 'cancelled')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.proposal.outputs.branch }}
+        run: |
+          # push 前に失敗していた場合は 422 になるが問題ない。元の失敗は cpr ステップが伝える
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" \
+            || echo "::warning::${BRANCH} を削除できませんでした。必要なら手動で削除してください"
