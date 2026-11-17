@@ -9,8 +9,8 @@
 #
 # 前提: リポジトリの Settings > Actions > General で
 #       "Allow GitHub Actions to create and approve pull requests" を有効にしておく。
-# 注意: GITHUB_TOKEN で作った PR では docker-images.yml が自動では起動しない。
-#       PR を close -> reopen すると build 検証が走る。
+# 注意: GITHUB_TOKEN で作った PR では docker-images.yml が承認待ちになる。
+#       PR 画面の "Approve workflows to run" を押すと build 検証が走る。
 name: update-pins
 
 on:
@@ -183,7 +183,7 @@ jobs:
           body: |
             ${{ matrix.description }}
 
-            このワークフローは GITHUB_TOKEN で PR を作成するため、docker-images の build 検証は自動では起動しません。マージ前にこの PR を close して reopen すると検証が走ります。
+            docker-images の build 検証は、PR 画面の「Approve workflows to run」を押すと実行されます。
 
       # PR 作成だけが失敗した場合、push 済みのブランチを消す。
       # 残すと次回以降「提案済み」と誤認して再提案されない
