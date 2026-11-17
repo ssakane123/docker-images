@@ -8,8 +8,8 @@ ENV PATH=${PATH}:${GOROOT}/bin:${GOPATH}/bin
 
 # --- 取得ステージ ------------------------------------------------------------
 # --- Go ----------------------------------------------------------------------
-ARG GO_VERSION=1.27.3
-ARG GO_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
+ARG GO_VERSION=1.27.4
+ARG GO_SHA256=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92
 RUN set -eu; \
     curl -fsSL -o /tmp/go.tar.gz \
       "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz"; \
